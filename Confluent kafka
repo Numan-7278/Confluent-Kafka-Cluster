@@ -1,0 +1,375 @@
+########################################## 
+Confluent Platform 
+########################################## 
+
+-----**** Update and install necessary packages ****----- 
+sudo apt-get update && sudo apt-get -y install curl wget gnupg2 ca-certificates lsb-release unzip net-tools jq netcat-traditional 
+
+-----**** Install Java 21 ****----- 
+
+sudo apt install openjdk-21-jdk -y 
+
+java -version 
+
+-----**** Send key to DC ****----- 
+
+scp -i abc.pem abc.pem ubuntu@oub-ip:~/.ssh/ 
+
+-----**** Configure profile ****----- 
+
+nano .profile 
+
+eval `ssh-agent` ssh-add /home/ubuntu/.ssh/abc.pem 
+
+source .profile 
+
+-----**** Kernel settings ****----- 
+
+sudo sysctl vm.swappiness=1 
+
+echo 'vm.swappiness=1' | sudo tee --append /etc/sysctl.conf 
+
+sudo sysctl -w vm.max_map_count=262144 
+
+echo 'vm.max_map_count=262144' | sudo tee --append /etc/sysctl.conf 
+
+-----**** Configure Confluent Platform 8.3 Repo ****----- 
+
+sudo mkdir -p /etc/apt/keyrings 
+
+wget -qO - https://packages.confluent.io/deb/8.3/archive.key | gpg \
+--dearmor | sudo tee /etc/apt/keyrings/confluent.gpg > /dev/null
+
+CP_DIST=$(lsb_release -cs) 
+echo "Types: deb 
+URIs: https://packages.confluent.io/deb/8.3 
+Suites: stable 
+Components: main 
+Architectures: $(dpkg --print-architecture) 
+Signed-by: /etc/apt/keyrings/confluent.gpg 
+
+Types: deb 
+URIs: https://packages.confluent.io/clients/deb/ 
+Suites: ${CP_DIST} 
+Components: main 
+Architectures: $(dpkg --print-architecture) 
+Signed-By: /etc/apt/keyrings/confluent.gpg" | sudo tee /etc/apt/sources.list.d/confluent-platform.sources > /dev/null
+
+sudo apt-get update 
+
+-----**** Install Confluent Platform (Enterprise) ****----- 
+
+sudo apt-get install -y confluent-platform 
+
+confluent version 
+
+## If "command not found", install it  
+(curl -sL --http1.1 https://cnfl.io/cli | sudo sh -s -- -b /usr/local/bin latest) 
+
+confluent version 
+
+-----**** Create Data Directories ****----- 
+
+sudo mkdir -p /var/lib/kafka/data 
+sudo mkdir -p /var/lib/kafka/metadata 
+sudo mkdir -p /var/lib/schema-registry 
+sudo mkdir -p /var/lib/kafka-connect 
+sudo mkdir -p /usr/share/confluent-hub-components 
+
+sudo chown -R cp-kafka:confluent /var/lib/kafka /var/lib/schema-registry /var/lib/kafka-connect 
+
+getent passwd | egrep 'cp-kafka|cp-schema-registry|cp-kafka-connect' 
+
+-----**** Generate Cluster ID ****----- 
+
+/usr/bin/kafka-storage random-uuid 
+(Run only on one node - SAVE the output.) 
+j8XHyZ5hT1mll6WUr6DnPA
+###### Create an Image (AMI) at this point and launch 2 more instances from this AMI -
+
+----**** /etc/hosts (on ALL 3 kafka nodes AND on cc) ****----- 
+
+sudo nano /etc/hosts 
+<private-ip-1> <private-dns-1> kafka1 
+<private-ip-2> <private-dns-2> kafka2 
+<private-ip-3> <private-dns-3> kafka3 
+<private-ip-4> <private-dns-4> cc 
+
+-----**** Install dsh (on kafka1) ****----- 
+
+sudo apt-get install dsh -y 
+
+sudo nano /etc/dsh/machines.list 
+#localhost 
+kafka1 
+kafka2 
+kafka3                         
+### Dont add cc 
+
+sudo nano /etc/dsh/dsh.conf 
+remoteshell =ssh 
+
+dsh -a uptime
+
+########################################################### 
+
+-->> Do below on CC node 
+
+-----**** Configure Control Center repo ****----- 
+
+wget -qO - https://packages.confluent.io/confluent-control-center-next-gen/deb/archive.key | gpg \
+--dearmor | sudo tee /etc/apt/keyrings/confluent-c3.gpg > /dev/null 
+
+echo "Types: deb 
+URIs: https://packages.confluent.io/confluent-control-center-next-gen/deb/ 
+Suites: stable 
+Components: main 
+Architectures: $(dpkg --print-architecture) 
+Signed-By: /etc/apt/keyrings/confluent-c3.gpg" | sudo tee /etc/apt/sources.list.d/confluent-control-center.sources > /dev/null 
+
+sudo apt-get update 
+
+-----**** Install Control Center ****----- 
+
+sudo apt install -y confluent-control-center-next-gen
+
+-----**** Open-files limit check ****----- 
+
+systemctl show confluent-control-center -p LimitNOFILE 
+
+## If the value is below 16384: 
+
+sudo systemctl edit confluent-control-center 
+
+[Service] 
+LimitNOFILE=100000 
+
+-----**** Configure Control Center ****----- 
+
+sudo cp /etc/confluent-control-center/control-center-production.properties /etc/confluent-control-center/control-center-production.properties.bak 
+
+sudo nano /etc/confluent-control-center/control-center-production.properties 
+
+## Scroll to the END of the file and paste the whole block 
+
+-----**** Give Control Center ownership of its alert files ****----- 
+
+sudo chown -c cp-control-center /etc/confluent-control-center/trigger_rules-generated.yml 
+
+sudo chown -c cp-control-center /etc/confluent-control-center/alertmanager-generated.yml
+
+-----**** Start Prometheus and Alertmanager ****----- 
+
+sudo systemctl enable prometheus 
+
+sudo systemctl start prometheus 
+
+sudo systemctl enable alertmanager 
+
+sudo systemctl start alertmanager 
+
+sudo systemctl status prometheus --no-pager 
+
+sudo systemctl status alertmanager --no-pager 
+
+curl http://localhost:9090/-/healthy 
+curl http://localhost:9093/-/healthy
+
+-----**** From kafka1: confirm brokers can reach Prometheus ****----- 
+
+dsh -a curl -s http://c3:9090/-/healthy 
+
+######################################################################## 
+
+-->> Back on Kafka1 
+
+------**** Configure kafka properties ****----- 
+
+dsh -a sudo mv /etc/kafka/server.properties /etc/kafka/server.properties.bak 
+
+sudo nano /etc/kafka/server.properties 
+## Do this on all nodes. 
+
+------**** Format and initialise Kafka Storage ****----- 
+
+dsh -a sudo /usr/bin/kafka-storage format \
+-t j8XHyZ5hT1mll6WUr6DnPA \
+ -c /etc/kafka/server.properties 
+
+dsh -a sudo chown -R cp-kafka:confluent /var/lib/kafka 
+
+-----**** (Optional) Broker heap size ****----- 
+ 
+sudo systemctl edit confluent-server 
+
+[Service] 
+Environment="KAFKA_HEAP_OPTS=-Xms2g -Xmx2g" 
+
+-----**** Start kafka cluster ****----- 
+
+dsh -a sudo systemctl enable confluent-server 
+
+dsh -a sudo systemctl start confluent-server 
+
+dsh -a sudo systemctl status confluent-server --no-pager 
+
+sudo journalctl -u confluent-server -f
+
+----**** Working with Kafka ****----- 
+
+kafka-metadata-quorum --bootstrap-server kf1:9092 describe --status 
+
+kafka-broker-api-versions --bootstrap-server kf1:9092
+
+kafka-topics --bootstrap-server kf1:9092 --create --topic test-topic --partitions 3 --replication-factor 3 
+
+kafka-console-producer --bootstrap-server kf1:9092 --topic test-topic 
+
+kafka-console-consumer --bootstrap-server kf2:9092 --topic test-topic --from-beginning 
+
+kafka-topics --bootstrap-server kf1:9092 --describe --topic test-topic
+
+-----**** Configure Schema Registry ****----- 
+
+dsh -a sudo mv /etc/schema-registry/schema-registry.properties /etc/schema-registry/schema-registry.properties.bak 
+
+sudo nano /etc/schema-registry/schema-registry.properties 
+## Do this on all nodes.  
+
+-----**** Start Schema Registry ****----- 
+
+dsh -a sudo systemctl enable confluent-schema-registry 
+
+dsh -a sudo systemctl restart confluent-schema-registry 
+
+dsh -a sudo systemctl status confluent-schema-registry --no-pager 
+
+curl http://kf1:8081/subjects 
+curl http://kf2:8081/subjects 
+curl http://kf3:8081/subjects 
+
+-----**** Configure Kafka Connect ****----- 
+
+dsh -a sudo mv /etc/kafka/connect-distributed.properties /etc/kafka/connect-distributed.properties.bak 
+
+sudo nano /etc/kafka/connect-distributed.properties 
+## Do this on all nodes.
+
+-----**** Start Kafka Connect ****----- 
+
+dsh -a sudo systemctl enable confluent-kafka-connect 
+
+dsh -a sudo systemctl restart confluent-kafka-connect 
+
+dsh -a sudo systemctl status confluent-kafka-connect --no-pager 
+
+curl http://kf1:8083/connectors
+
+-----**** Start Control Center ****----- 
+
+sudo systemctl enable confluent-control-center 
+
+sudo systemctl start confluent-control-center 
+
+sudo systemctl status confluent-control-center --no-pager 
+
+sudo journalctl -u confluent-control-center -n 100 --no-pager 
+### (Wait for 2-3 minutes) 
+
+curl -I http://localhost:9021 
+
+## Browser: http://<cc-public-ip>:9021   
+
+################################################################################## 
+
+-----**** Using Kafka Connect ****----- 
+
+dsh -a sudo confluent connect plugin install confluentinc/kafka-connect-datagen:latest --plugin
+directory /usr/share/confluent-hub-components --force 
+
+dsh -a sudo confluent connect plugin install confluentinc/kafka-connect-s3:latest --plugin-directory /usr/share/confluent-hub-components --force 
+
+## Rolling restart of Connect, one worker at a time 
+ssh kafka1 sudo systemctl restart confluent-kafka-connect 
+ssh kafka2 sudo systemctl restart confluent-kafka-connect 
+ssh kafka3 sudo systemctl restart confluent-kafka-connect 
+
+dsh -a sudo systemctl status confluent-kafka-connect --no-pager 
+(Wait for 2-5 mins) 
+curl -s http://kafka1:8083/connector-plugins | jq '.[].class' | grep Datagen 
+curl -s http://kafka1:8083/connector-plugins | jq '.[].class' | grep S3Sink 
+curl -s http://kafka1:8083/connector-plugins | jq .
+
+###  Check logs  
+
+sudo journalctl -u confluent-kafka-connect -f 
+
+>> Attach IAM role to all three kafka nodes 
+
+kafka-topics --bootstrap-server kafka1:9092 --create --topic datagen-orders --partitions 3 -
+replication-factor 3 
+
+nano datagen-connector.json 
+{ 
+"name": "datagen-orders-connector", 
+"config": { 
+"connector.class": "io.confluent.kafka.connect.datagen.DatagenConnector", 
+"kafka.topic": "datagen-orders", 
+"quickstart": "orders", 
+"key.converter": "org.apache.kafka.connect.storage.StringConverter", 
+"value.converter": "org.apache.kafka.connect.json.JsonConverter", 
+"value.converter.schemas.enable": "false", 
+"max.interval": "100", 
+"iterations": "1000000", 
+"tasks.max": "3" 
+ } 
+}
+
+curl -X POST -H "Content-Type: application/json" -d @datagen-connector.json 
+http://kafka1:8083/connectors 
+
+curl -s http://kafka1:8083/connectors/datagen-orders-connector/status | jq . 
+
+nano s3-sink-connector.json 
+{ 
+"name": "s3-sink-orders", 
+"config": { 
+"connector.class": "io.confluent.connect.s3.S3SinkConnector", 
+"tasks.max": "3", 
+"topics": "datagen-orders", 
+"s3.region": "us-east-1", 
+"s3.bucket.name": "YOUR_BUCKET", 
+"flush.size": "3000", 
+"storage.class": "io.confluent.connect.s3.storage.S3Storage", 
+"format.class": "io.confluent.connect.s3.format.json.JsonFormat", 
+"key.converter": "org.apache.kafka.connect.storage.StringConverter", 
+"value.converter": "org.apache.kafka.connect.json.JsonConverter", 
+"value.converter.schemas.enable": "false", 
+"schema.compatibility": "NONE", 
+"partitioner.class": "io.confluent.connect.storage.partitioner.DefaultPartitioner" 
+} 
+} 
+
+curl -X POST -H "Content-Type: application/json" -d @s3-sink-connector.json 
+http://kafka1:8083/connectors 
+
+curl -s http://kafka1:8083/connectors/s3-sink-orders/status | jq . 
+
+curl -s http://kafka1:8083/connectors/datagen-orders-connector | jq .
+
+
+################################################################################## 
+
+>>>> Stopping the cluster 
+
+# On cc 
+
+sudo systemctl stop confluent-control-center prometheus alertmanager 
+
+# On kafka1 
+
+dsh -a sudo systemctl stop confluent-kafka-connect 
+
+dsh -a sudo systemctl stop confluent-schema-registry 
+
+dsh -a sudo systemctl stop confluent-server
